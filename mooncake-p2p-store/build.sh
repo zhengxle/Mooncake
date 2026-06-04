@@ -57,6 +57,10 @@ if [ -e "/usr/lib64/liburma.so" ]; then
    EXT_LDFLAGS+=" -L/usr/lib64 -lurma"
 fi
 
+if [ -d "/opt/maca/lib" ]; then
+    EXT_LDFLAGS+=" -L$MACA_PATH/lib -lmcruntime -lmxc-runtime64 -lruntime_cu"
+fi
+
 if [ "$USE_ETCD" = "ON" ]; then
     if [ "$USE_ETCD_LEGACY" = "ON" ]; then
         EXT_LDFLAGS+=" -letcd-cpp-api -lprotobuf -lgrpc++ -lgrpc"

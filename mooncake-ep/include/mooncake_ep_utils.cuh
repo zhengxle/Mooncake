@@ -2,26 +2,6 @@
 
 #include <mooncake_ep_exception.cuh>
 
-#define UNROLLED_WARP_COPY(UNROLL_FACTOR, LANE_ID, N, DST, SRC, LD_FUNC,      \
-                           ST_FUNC)                                           \
-    {                                                                         \
-        constexpr int kLoopStride = 32 * (UNROLL_FACTOR);                     \
-        typename std::remove_reference<decltype(LD_FUNC((SRC) + 0))>::type    \
-            unrolled_values[(UNROLL_FACTOR)];                                 \
-        auto __src = (SRC);                                                   \
-        auto __dst = (DST);                                                   \
-        for (int __i = (LANE_ID); __i < ((N) / kLoopStride) * kLoopStride;    \
-             __i += kLoopStride) {                                            \
-            _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j) \
-                unrolled_values[__j] = LD_FUNC(__src + __i + __j * 32);       \
-            _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j) \
-                ST_FUNC(__dst + __i + __j * 32, unrolled_values[__j]);        \
-        }                                                                     \
-        for (int __i = ((N) / kLoopStride) * kLoopStride + (LANE_ID);         \
-             __i < (N); __i += 32)                                            \
-            ST_FUNC(__dst + __i, LD_FUNC(__src + __i));                       \
-    }
-
 namespace mooncake {
 
 template <int kBytes>
@@ -46,6 +26,409 @@ template <>
 struct VecInt<16> {
     using vec_t = int4;
 };
+
+#ifdef USE_MACA
+#include <cooperative_groups.h>
+constexpr int kLocalWarpSize = 64;
+constexpr uint64_t kLocalWarpMask = 0xffffffffffffffffULL;
+
+#define UNROLLED_WARP_COPY(UNROLL_FACTOR, LANE_ID, N, DST, SRC, LD_FUNC,      \
+                           ST_FUNC)                                           \
+    {                                                                         \
+        constexpr int kLoopStride = kLocalWarpSize * (UNROLL_FACTOR);                     \
+        typename std::remove_reference<decltype(LD_FUNC((SRC) + 0))>::type    \
+            unrolled_values[(UNROLL_FACTOR)];                                 \
+        auto __src = (SRC);                                                   \
+        auto __dst = (DST);                                                   \
+        for (int __i = (LANE_ID); __i < ((N) / kLoopStride) * kLoopStride;    \
+             __i += kLoopStride) {                                            \
+            _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j) \
+                unrolled_values[__j] = LD_FUNC(__src + __i + __j * kLocalWarpSize);       \
+            _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j) \
+                ST_FUNC(__dst + __i + __j * kLocalWarpSize, unrolled_values[__j]);        \
+        }                                                                     \
+        for (int __i = ((N) / kLoopStride) * kLoopStride + (LANE_ID);         \
+             __i < (N); __i += kLocalWarpSize)                                            \
+            ST_FUNC(__dst + __i, LD_FUNC(__src + __i));                       \
+    }
+
+// 1. using builtin __trap() replace trap
+__device__ __forceinline__ void trap() { __trap(); }
+
+// 2. using builtin __threadfence_system/block/device replace fence asm
+__device__ __forceinline__ void memory_fence() {
+    __threadfence_system();
+}
+
+__device__ __forceinline__ void memory_fence_gpu() {
+    __threadfence();
+}
+
+__device__ __forceinline__ void memory_fence_cta() {
+    __threadfence_block();
+}
+
+__device__ __forceinline__ void st_relaxed_sys_global(const int *ptr, int val) {
+    *const_cast<volatile int*>(ptr) = val;
+}
+
+__device__ __forceinline__ void st_release_sys_global(const int *ptr, int val) {
+    __threadfence_system();
+    *const_cast<volatile int*>(ptr) = val;
+}
+
+__device__ __forceinline__ void st_release_cta(const int *ptr, int val) {
+    __threadfence_block();
+    *const_cast<volatile int*>(ptr) = val;
+}
+
+__device__ __forceinline__ int ld_acquire_sys_global(const int *ptr) {
+    int ret = *const_cast<volatile int*>(ptr);
+    __threadfence_system();
+    return ret;
+}
+
+__device__ __forceinline__ uint64_t ld_acquire_sys_global(const uint64_t *ptr) {
+    uint64_t ret = *const_cast<volatile uint64_t*>(ptr);
+    __threadfence_system();
+    return ret;
+}
+
+__device__ __forceinline__ int ld_acquire_global(const int *ptr) {
+    int ret = *const_cast<volatile int*>(ptr);
+    __threadfence();
+    return ret;
+}
+
+__device__ __forceinline__ int atomic_add_release_sys_global(const int *ptr, int value) {
+    __threadfence_system();
+    return atomicAdd_system(const_cast<int*>(ptr), value);
+}
+
+__device__ __forceinline__ int atomic_add_release_global(const int *ptr, int value) {
+    __threadfence();
+    return atomicAdd(const_cast<int*>(ptr), value);
+}
+
+
+__device__ __forceinline__ int ld_acquire_cta(const int *ptr) {
+    int ret = *const_cast<volatile int*>(ptr);
+    __threadfence_block();
+    return ret;
+}
+
+__device__ __forceinline__ uint8_t ld_na_relaxed(const uint8_t *ptr) {
+    return *const_cast<volatile uint8_t*>(ptr);
+}
+
+__device__ __forceinline__ uint16_t ld_na_relaxed(const uint16_t *ptr) {
+    return *const_cast<volatile uint16_t*>(ptr);
+}
+
+__device__ __forceinline__ uint32_t ld_na_relaxed(const uint32_t *ptr) {
+    return *const_cast<volatile uint32_t*>(ptr);
+}
+
+__device__ __forceinline__ uint64_t ld_na_relaxed(const uint64_t *ptr) {
+    return *const_cast<volatile uint64_t*>(ptr);
+}
+
+__device__ __forceinline__ int ld_volatile_global(const int *ptr) {
+    return *const_cast<volatile int*>(ptr);
+}
+
+__device__ __forceinline__ float ld_volatile_global(const float *ptr) {
+    return *const_cast<volatile float*>(ptr);
+}
+
+__device__ __forceinline__ int64_t ld_volatile_global(const int64_t *ptr) {
+    return *const_cast<volatile int64_t*>(ptr);
+}
+
+__device__ __forceinline__ int64_t ld_volatile_global(const uint64_t *ptr) {
+    return *const_cast<volatile int64_t*>(reinterpret_cast<const int64_t*>(ptr));
+}
+
+template <typename dtype_t>
+__device__ __forceinline__ dtype_t ld_nc_global(const dtype_t *ptr) {
+    return *const_cast<volatile dtype_t*>(ptr);
+}
+
+template <>
+__device__ __forceinline__ uint8_t ld_nc_global(const uint8_t *ptr) {
+    return *const_cast<volatile uint8_t*>(ptr);
+}
+
+template <>
+__device__ __forceinline__ int ld_nc_global(const int *ptr) {
+    return *const_cast<volatile int*>(ptr);
+}
+
+template <>
+__device__ __forceinline__ int64_t ld_nc_global(const int64_t *ptr) {
+    return *const_cast<volatile int64_t*>(ptr);
+}
+
+template <>
+__device__ __forceinline__ float ld_nc_global(const float *ptr) {
+    return *const_cast<volatile float*>(ptr);
+}
+
+template <>
+__device__ __forceinline__ int2 ld_nc_global(const int2 *ptr) {
+    int2 ret;
+    const volatile int* v_ptr = reinterpret_cast<const volatile int*>(ptr);
+    ret.x = v_ptr[0];
+    ret.y = v_ptr[1];
+    return ret;
+}
+
+template <>
+__device__ __forceinline__ int4 ld_nc_global(const int4 *ptr) {
+  int4 ret;
+    const volatile int* v_ptr = reinterpret_cast<const volatile int*>(ptr);
+    ret.x = v_ptr[0];
+    ret.y = v_ptr[1];
+    ret.z = v_ptr[2];
+    ret.w = v_ptr[3];
+    return ret;
+}
+
+__device__ __forceinline__ void st_na_relaxed(const uint8_t *ptr, uint8_t val) {
+    *const_cast<volatile uint8_t*>(ptr) = val;
+}
+
+__device__ __forceinline__ void st_na_relaxed(const uint16_t *ptr, uint16_t val) {
+    *const_cast<volatile uint16_t*>(ptr) = val;
+}
+
+__device__ __forceinline__ void st_na_relaxed(const uint32_t *ptr, uint32_t val) {
+    *const_cast<volatile uint32_t*>(ptr) = val;
+}
+
+__device__ __forceinline__ void st_na_relaxed(const int *ptr, int val) {
+    *const_cast<volatile int*>(ptr) = val;
+}
+
+__device__ __forceinline__ void st_na_relaxed(const int4 *ptr, int4 val) {
+    volatile int* v_ptr = reinterpret_cast<volatile int*>(const_cast<int4*>(ptr));
+    v_ptr[0] = val.x;
+    v_ptr[1] = val.y;
+    v_ptr[2] = val.z;
+    v_ptr[3] = val.w;
+}
+
+__device__ __forceinline__ void st_na_release(const int *ptr, int val) {
+    __threadfence();
+    *const_cast<volatile int*>(ptr) = val;
+}
+
+__device__ __forceinline__ void st_na_release(const uint32_t *ptr, uint32_t val) {
+    __threadfence();
+    *const_cast<volatile uint32_t*>(ptr) = val;
+}
+
+__device__ __forceinline__ void st_na_release(const uint64_t *ptr, uint64_t val) {
+    __threadfence();
+    *const_cast<volatile uint64_t*>(ptr) = val;
+}
+
+template <typename dtype_t>
+__device__ __forceinline__ void st_na_global(const dtype_t *ptr, const dtype_t &value) {
+    *const_cast<volatile dtype_t*>(ptr) = value;
+}
+
+template <>
+__device__ __forceinline__ void st_na_global(const int *ptr, const int &value) {
+    *const_cast<volatile int*>(ptr) = value;
+}
+
+template <>
+__device__ __forceinline__ void st_na_global(const int64_t *ptr, const int64_t &value) {
+    *const_cast<volatile int64_t*>(ptr) = value;
+}
+
+template <>
+__device__ __forceinline__ void st_na_global(const float *ptr, const float &value) {
+    *const_cast<volatile float*>(ptr) = value;
+}
+
+template <>
+__device__ __forceinline__ void st_na_global(const int4 *ptr, const int4 &value) {
+    volatile int* v_ptr = reinterpret_cast<volatile int*>(const_cast<int4*>(ptr));
+    v_ptr[0] = value.x;
+    v_ptr[1] = value.y;
+    v_ptr[2] = value.z;
+    v_ptr[3] = value.w;
+}
+
+__device__ __forceinline__ void fence_view_async_shared() {
+    __threadfence_block();
+}
+
+__device__ __forceinline__ void fence_barrier_init() {
+    __threadfence_system();
+}
+
+__device__ __forceinline__ void mbarrier_init(uint64_t *mbar_ptr, uint32_t arrive_count) {
+    *const_cast<volatile uint64_t*>(mbar_ptr) = arrive_count;
+}
+
+__device__ __forceinline__ void mbarrier_wait(uint64_t *mbar_ptr, uint32_t &phase) {
+    while (*const_cast<volatile uint64_t*>(mbar_ptr) > 0) {
+    }
+    phase ^= 1;
+}
+
+__device__ __forceinline__ void mbarrier_arrive_and_expect_tx(uint64_t *mbar_ptr, int num_bytes) {
+    __threadfence_block();
+}
+
+__device__ __forceinline__ void tma_store_fence() {
+    __threadfence_block();
+}
+
+constexpr uint64_t kEvictFirst = 0x12f0000000000000;
+constexpr uint64_t kEvictNormal = 0x1000000000000000;
+
+__device__ __forceinline__ void tma_load_1d(const void *smem_ptr,
+                                            const void *gmem_ptr,
+                                            uint64_t *mbar_ptr, int num_bytes,
+                                            bool evict_first = true) {
+    uint8_t* dst = reinterpret_cast<uint8_t*>(const_cast<void*>(smem_ptr));
+    const uint8_t* src = reinterpret_cast<const uint8_t*>(gmem_ptr);
+    for (int i = 0; i < num_bytes; ++i) {
+        dst[i] = src[i];
+    }
+    __threadfence_block();
+    if (mbar_ptr) {
+        *const_cast<volatile uint64_t*>(mbar_ptr) = 0;
+    }
+}
+
+__device__ __forceinline__ void tma_store_1d(const void *smem_ptr,
+                                             const void *gmem_ptr,
+                                             int num_bytes,
+                                             bool evict_first = true) {
+    uint8_t* dst = reinterpret_cast<uint8_t*>(const_cast<void*>(gmem_ptr));
+    const uint8_t* src = reinterpret_cast<const uint8_t*>(smem_ptr);
+    for (int i = 0; i < num_bytes; ++i) {
+        dst[i] = src[i];
+    }
+    __threadfence_system();
+}
+
+template <int N = 0>
+__device__ __forceinline__ void tma_store_wait() {
+    __threadfence_system();
+}
+
+template <typename dtype_t>
+__host__ __device__ dtype_t cell_div(dtype_t a, dtype_t b) {
+    return (a + b - 1) / b;
+}
+
+template <typename dtype_t>
+__host__ __device__ dtype_t align(dtype_t a, dtype_t b) {
+    return cell_div<dtype_t>(a, b) * b;
+}
+
+__forceinline__ __device__ void get_channel_task_range(int num_tokens,
+                                                       int num_sms, int sm_id,
+                                                       int &token_start_idx,
+                                                       int &token_end_idx) {
+    int num_tokens_per_sm = cell_div(num_tokens, num_sms);
+    token_start_idx = min(num_tokens_per_sm * sm_id, num_tokens);
+    token_end_idx = min(token_start_idx + num_tokens_per_sm, num_tokens);
+}
+
+
+template <typename dtype_a_t, typename dtype_b_t>
+__device__ __forceinline__ dtype_b_t pack2(const dtype_a_t &x,
+                                           const dtype_a_t &y) {
+    EP_STATIC_ASSERT(sizeof(dtype_a_t) * 2 == sizeof(dtype_b_t),
+                     "Invalid dtypes");
+    dtype_b_t packed;
+    auto unpacked_ptr = reinterpret_cast<dtype_a_t *>(&packed);
+    unpacked_ptr[0] = x, unpacked_ptr[1] = y;
+    return packed;
+}
+
+template <typename dtype_a_t, typename dtype_b_t>
+__device__ __forceinline__ void unpack2(const dtype_b_t &packed, dtype_a_t &x,
+                                        dtype_a_t &y) {
+    EP_STATIC_ASSERT(sizeof(dtype_a_t) * 2 == sizeof(dtype_b_t),
+                     "Invalid dtypes");
+    auto unpacked_ptr = reinterpret_cast<const dtype_a_t *>(&packed);
+    x = unpacked_ptr[0], y = unpacked_ptr[1];
+}
+
+template <typename dtype_t>
+__device__ __forceinline__ dtype_t broadcast(dtype_t &ptr, int src_lane_idx) {
+    EP_STATIC_ASSERT(sizeof(dtype_t) % sizeof(int) == 0, "");
+    auto send_int_values = reinterpret_cast<int *>(&ptr);
+    int recv_int_values[sizeof(dtype_t) / sizeof(int)];
+#pragma unroll
+    for (int i = 0; i < sizeof(dtype_t) / sizeof(int); ++i)
+        recv_int_values[i] =
+            __shfl_sync(kLocalWarpMask, send_int_values[i], src_lane_idx);
+    return *reinterpret_cast<dtype_t *>(recv_int_values);
+}
+
+__forceinline__ __device__ int warp_reduce_sum(int value) {
+    value += __shfl_xor_sync(kLocalWarpMask, value, 32);
+    value += __shfl_xor_sync(kLocalWarpMask, value, 16);
+    value += __shfl_xor_sync(kLocalWarpMask, value, 8);
+    value += __shfl_xor_sync(kLocalWarpMask, value, 4);
+    value += __shfl_xor_sync(kLocalWarpMask, value, 2);
+    value += __shfl_xor_sync(kLocalWarpMask, value, 1);
+    return value;
+}
+
+__forceinline__ __device__ float half_warp_reduce_max(float value) {
+    auto mask = __activemask();
+    value = max(value, __shfl_xor_sync(mask, value, 16));
+    value = max(value, __shfl_xor_sync(mask, value, 8));
+    value = max(value, __shfl_xor_sync(mask, value, 4));
+    value = max(value, __shfl_xor_sync(mask, value, 2));
+    value = max(value, __shfl_xor_sync(mask, value, 1));
+    return value;
+}
+
+__forceinline__ __device__ int get_lane_id() {
+    return threadIdx.x % kLocalWarpSize;
+}
+
+template <int kNumRanks>
+__device__ __forceinline__ bool not_finished(int *task, int expected) {
+    auto result = false;
+    auto lane_id = threadIdx.x % kLocalWarpSize;
+    if (lane_id < kNumRanks)
+        result = ld_volatile_global(task + lane_id) != expected;
+    return __any_sync(kLocalWarpMask, result);
+}
+
+#else
+
+#define UNROLLED_WARP_COPY(UNROLL_FACTOR, LANE_ID, N, DST, SRC, LD_FUNC,      \
+                           ST_FUNC)                                           \
+    {                                                                         \
+        constexpr int kLoopStride = 32 * (UNROLL_FACTOR);                     \
+        typename std::remove_reference<decltype(LD_FUNC((SRC) + 0))>::type    \
+            unrolled_values[(UNROLL_FACTOR)];                                 \
+        auto __src = (SRC);                                                   \
+        auto __dst = (DST);                                                   \
+        for (int __i = (LANE_ID); __i < ((N) / kLoopStride) * kLoopStride;    \
+             __i += kLoopStride) {                                            \
+            _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j) \
+                unrolled_values[__j] = LD_FUNC(__src + __i + __j * 32);       \
+            _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j) \
+                ST_FUNC(__dst + __i + __j * 32, unrolled_values[__j]);        \
+        }                                                                     \
+        for (int __i = ((N) / kLoopStride) * kLoopStride + (LANE_ID);         \
+             __i < (N); __i += 32)                                            \
+            ST_FUNC(__dst + __i, LD_FUNC(__src + __i));                       \
+    }
 
 __device__ __forceinline__ void trap() { asm("trap;"); }
 
@@ -493,11 +876,6 @@ __forceinline__ __device__ int get_lane_id() {
 }
 
 template <int kNumRanks>
-__forceinline__ __device__ void move_fifo_slots(int &head) {
-    head = (head + kNumRanks) % NUM_MAX_FIFO_SLOTS;
-}
-
-template <int kNumRanks>
 __device__ __forceinline__ bool not_finished(int *task, int expected) {
     auto result = false;
     auto lane_id = threadIdx.x % 32;
@@ -505,6 +883,14 @@ __device__ __forceinline__ bool not_finished(int *task, int expected) {
         result = ld_volatile_global(task + lane_id) != expected;
     return __any_sync(0xffffffff, result);
 }
+
+#endif
+
+template <int kNumRanks>
+__forceinline__ __device__ void move_fifo_slots(int &head) {
+    head = (head + kNumRanks) % NUM_MAX_FIFO_SLOTS;
+}
+
 
 template <int kNumRanks>
 __forceinline__ __device__ void timeout_check(int **task_fifo_ptrs, int head,
@@ -523,8 +909,11 @@ template <int kNumRanks>
 __forceinline__ __device__ void barrier_device(int **task_fifo_ptrs, int head,
                                                int rank, int tag = 0) {
     auto thread_id = static_cast<int>(threadIdx.x);
+#ifdef USE_MACA
+    EP_DEVICE_ASSERT(kNumRanks <= kLocalWarpSize);
+#else
     EP_DEVICE_ASSERT(kNumRanks <= 32);
-
+#endif
     if (thread_id < kNumRanks) {
         atomicAdd_system(task_fifo_ptrs[rank] + head + thread_id,
                          FINISHED_SUM_TAG);

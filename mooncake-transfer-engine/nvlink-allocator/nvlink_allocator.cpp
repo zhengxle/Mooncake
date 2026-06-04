@@ -10,7 +10,11 @@ static CUresult cuMemCreateTryFabric(CUmemGenericAllocationHandle *handle,
     CUresult err = cuMemCreate(handle, size, prop, flags);
     if ((prop->requestedHandleTypes & CU_MEM_HANDLE_TYPE_FABRIC) &&
         (err == CUDA_ERROR_NOT_PERMITTED || err == CUDA_ERROR_NOT_SUPPORTED)) {
-        prop->requestedHandleTypes = static_cast<CUmemAllocationHandleType>(
+#ifdef USE_MACA
+        prop->requestedHandleTypes = static_cast<mcMemAllocationHandleType>(
+#else
+        prop->requestedHandleTypes = static_cast<CUMemAllocationHandleType>(
+#endif
             prop->requestedHandleTypes & ~CU_MEM_HANDLE_TYPE_FABRIC);
         err = cuMemCreate(handle, size, prop, flags);
     }
