@@ -15,7 +15,13 @@
 #include "memory_location.h"
 
 #include "cuda_alike.h"
-
+#if defined (USE_MACA)
+#include "gpu_vendor/maca.h"
+#elif defined (USE_MUSA)
+#include "gpu_vendor/musa.h"
+#elif defined (USE_HIP)
+#include "gpu_vendor/hip.h"
+#endif
 namespace mooncake {
 
 uintptr_t alignPage(uintptr_t address) { return address & ~(pagesize - 1); }
