@@ -29,6 +29,14 @@
 #include <memory>
 #include <thread>
 
+#if defined (USE_MACA)
+#include "gpu_vendor/maca.h"
+#elif defined (USE_MUSA)
+#include "gpu_vendor/musa.h"
+#elif defined (USE_HIP)
+#include "gpu_vendor/hip.h"
+#endif
+
 #include "config.h"
 #include "cuda_alike.h"
 #include "environ.h"
@@ -407,9 +415,13 @@ int RdmaContext::registerMemoryRegionInternal(void *addr, size_t length,
         }
 
         int dmabuf_fd;
-        result = cuMemGetHandleForAddressRange(
+        result = static_cast<CUresult>(cuMemGetHandleForAddressRange(
+#ifdef USE_MACA
+            &dmabuf_fd, reinterpret_cast<void*>(allocBase), allocSize,
+#else
             &dmabuf_fd, allocBase, allocSize,
-            CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, 0);
+#endif
+            CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, 0));
         if (result != CUDA_SUCCESS) {
             const char *errStr;
             cuGetErrorString(result, &errStr);

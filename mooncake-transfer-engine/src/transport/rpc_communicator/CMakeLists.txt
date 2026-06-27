@@ -1,7 +1,13 @@
 file(GLOB CORO_RPC_SOURCES "*.cpp")
 
-find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
+set(Python3_FOUND TRUE CACHE BOOL "" FORCE)
+set(Python3_Development.Module_FOUND TRUE CACHE BOOL "" FORCE)
+set(Python3_Interpreter_FOUND TRUE CACHE BOOL "" FORCE)
+set(Python3_INCLUDE_DIRS "/usr/include/python3.10" CACHE PATH "" FORCE)
+set(Python3_LIBRARIES "/usr/lib/x86_64-linux-gnu/libpython3.10.so" CACHE FILEPATH "" FORCE)
 
+
+find_package(Python3 REQUIRED)
 add_library(rpc_communicator OBJECT ${CORO_RPC_SOURCES})
 
 target_link_libraries(rpc_communicator 

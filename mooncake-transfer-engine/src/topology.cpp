@@ -39,6 +39,14 @@
 #include <urma_api.h>
 #endif
 
+#if defined (USE_MACA)
+#include "gpu_vendor/maca.h"
+#elif defined (USE_MUSA)
+#include "gpu_vendor/musa.h"
+#elif defined (USE_HIP)
+#include "gpu_vendor/hip.h"
+#endif
+
 namespace mooncake {
 
 static bool isIbDeviceAccessible(struct ibv_device *device) {

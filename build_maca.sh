@@ -23,10 +23,10 @@ cmake -G Ninja .. -DBUILD_UNIT_TESTS=OFF \
         -DPython3_ROOT_DIR=/usr \
         -DPython3_FIND_STRATEGY=LOCATION \
         -DCMAKE_BUILD_TYPE=Release
-cmake --build ./ -v  && echo "SUCCESS BUILD" &&
-cd -
+cmake --build ./ -v  && echo "SUCCESS BUILD" && \
+cd - && \
 mkdir -p build/mooncake-transfer-engine/nvlink-allocator && \
     cd mooncake-transfer-engine/nvlink-allocator && \
     bash build.sh --use-maca ../../build/mooncake-transfer-engine/nvlink-allocator/ && \
-cd - 
+cd -  && \
 OUTPUT_DIR=dist && ./scripts/build_wheel.sh

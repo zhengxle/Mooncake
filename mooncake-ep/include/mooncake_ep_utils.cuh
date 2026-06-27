@@ -2,6 +2,31 @@
 
 #include <mooncake_ep_device.h>
 
+#ifdef USE_MACA
+#include <cooperative_groups.h>
+constexpr int kLocalWarpSize = 64;
+constexpr uint64_t kLocalWarpMask = 0xffffffffffffffffULL;
+
+#define UNROLLED_WARP_COPY(UNROLL_FACTOR, LANE_ID, N, DST, SRC, LD_FUNC,      \
+                           ST_FUNC)                                           \
+    {                                                                         \
+        constexpr int kLoopStride = kLocalWarpSize * (UNROLL_FACTOR);                     \
+        typename std::remove_reference<decltype(LD_FUNC((SRC) + 0))>::type    \
+            unrolled_values[(UNROLL_FACTOR)];                                 \
+        auto __src = (SRC);                                                   \
+        auto __dst = (DST);                                                   \
+        for (int __i = (LANE_ID); __i < ((N) / kLoopStride) * kLoopStride;    \
+             __i += kLoopStride) {                                            \
+            _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j) \
+                unrolled_values[__j] = LD_FUNC(__src + __i + __j * kLocalWarpSize);       \
+            _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j) \
+                ST_FUNC(__dst + __i + __j * kLocalWarpSize, unrolled_values[__j]);        \
+        }                                                                     \
+        for (int __i = ((N) / kLoopStride) * kLoopStride + (LANE_ID);         \
+             __i < (N); __i += kLocalWarpSize)                                            \
+            ST_FUNC(__dst + __i, LD_FUNC(__src + __i));                       \
+    }
+#else
 #define UNROLLED_WARP_COPY(UNROLL_FACTOR, LANE_ID, N, DST, SRC, LD_FUNC,      \
                            ST_FUNC)                                           \
     {                                                                         \
@@ -21,6 +46,7 @@
              __i < (N); __i += 32)                                            \
             ST_FUNC(__dst + __i, LD_FUNC(__src + __i));                       \
     }
+#endif
 
 namespace mooncake {
 
@@ -47,6 +73,33 @@ struct VecInt<16> {
     using vec_t = int4;
 };
 
+#ifdef USE_MACA
+__device__ __forceinline__ void fence_view_async_shared() {
+    __threadfence_block();
+}
+
+__device__ __forceinline__ void fence_barrier_init() {
+    __threadfence_system();
+}
+
+__device__ __forceinline__ void mbarrier_init(uint64_t *mbar_ptr, uint32_t arrive_count) {
+    *const_cast<volatile uint64_t*>(mbar_ptr) = arrive_count;
+}
+
+__device__ __forceinline__ void mbarrier_wait(uint64_t *mbar_ptr, uint32_t &phase) {
+    while (*const_cast<volatile uint64_t*>(mbar_ptr) > 0) {
+    }
+    phase ^= 1;
+}
+
+__device__ __forceinline__ void mbarrier_arrive_and_expect_tx(uint64_t *mbar_ptr, int num_bytes) {
+    __threadfence_block();
+}
+
+__device__ __forceinline__ void tma_store_fence() {
+    __threadfence_block();
+}
+#else
 // ---- TMA / mbarrier helpers (CUDA only) ----
 #ifndef MOONCAKE_EP_USE_MUSA
 
@@ -96,6 +149,7 @@ __device__ __forceinline__ void mbarrier_arrive_and_expect_tx(
 __device__ __forceinline__ void tma_store_fence() {
     asm volatile("fence.proxy.async.shared::cta;");
 }
+#endif //USE_MACA
 
 constexpr uint64_t kEvictFirst = 0x12f0000000000000;
 constexpr uint64_t kEvictNormal = 0x1000000000000000;
@@ -104,6 +158,35 @@ __device__ __forceinline__ void tma_load_1d(const void *smem_ptr,
                                             const void *gmem_ptr,
                                             uint64_t *mbar_ptr, int num_bytes,
                                             bool evict_first = true) {
+#ifdef USE_MACA
+    const int thread_id = threadIdx.x;
+    const int block_size = blockDim.x;
+
+    auto* src_vec = reinterpret_cast<const int4*>(gmem_ptr);
+    auto* dst_vec = reinterpret_cast<int4*>(const_cast<void*>(smem_ptr));
+
+    int num_vecs = num_bytes / sizeof(int4);
+
+    int i = thread_id;
+    for (; i < num_vecs; i += block_size) {
+        dst_vec[i] = src_vec[i];
+    }
+
+    int remainder_start = num_vecs * sizeof(int4);
+    auto* src_byte = reinterpret_cast<const char*>(gmem_ptr) + remainder_start;
+    auto* dst_byte = reinterpret_cast<char*>(const_cast<void*>(smem_ptr)) + remainder_start;
+    int remainder_bytes = num_bytes - remainder_start;
+
+    for (int j = thread_id; j < remainder_bytes; j += block_size) {
+        dst_byte[j] = src_byte[j];
+    }
+
+    __syncthreads();
+    if (thread_id == 0 && mbar_ptr != nullptr) {
+        auto* mbar_ptr_u64 = reinterpret_cast<unsigned long long*>(mbar_ptr);
+        atomicAdd(mbar_ptr_u64, static_cast<unsigned long long>(num_bytes));
+    }
+#else
     auto mbar_int_ptr =
         static_cast<uint32_t>(__cvta_generic_to_shared(mbar_ptr));
     auto smem_int_ptr =
@@ -114,12 +197,38 @@ __device__ __forceinline__ void tma_load_1d(const void *smem_ptr,
         "cache_hint [%0], [%1], %2, [%3], %4;\n" ::"r"(smem_int_ptr),
         "l"(gmem_ptr), "r"(num_bytes), "r"(mbar_int_ptr), "l"(cache_hint)
         : "memory");
+#endif
 }
 
 __device__ __forceinline__ void tma_store_1d(const void *smem_ptr,
                                              const void *gmem_ptr,
                                              int num_bytes,
                                              bool evict_first = true) {
+#ifdef USE_MACA
+    const int thread_id = threadIdx.x;
+    const int block_size = blockDim.x;
+
+    auto* src_vec = reinterpret_cast<const int4*>(smem_ptr);
+    auto* dst_vec = reinterpret_cast<int4*>(const_cast<void*>(gmem_ptr));
+
+    int num_vecs = num_bytes / sizeof(int4);
+
+    int i = thread_id;
+    for (; i < num_vecs; i += block_size) {
+        dst_vec[i] = src_vec[i];
+    }
+
+    int remainder_start = num_vecs * sizeof(int4);
+    auto* src_byte = reinterpret_cast<const char*>(smem_ptr) + remainder_start;
+    auto* dst_byte = reinterpret_cast<char*>(const_cast<void*>(gmem_ptr)) + remainder_start;
+    int remainder_bytes = num_bytes - remainder_start;
+
+    for (int j = thread_id; j < remainder_bytes; j += block_size) {
+        dst_byte[j] = src_byte[j];
+    }
+
+    __threadfence_system();
+#else
     auto smem_int_ptr =
         static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
     const auto cache_hint = evict_first ? kEvictFirst : kEvictNormal;
@@ -129,11 +238,16 @@ __device__ __forceinline__ void tma_store_1d(const void *smem_ptr,
         "r"(smem_int_ptr), "r"(num_bytes), "l"(cache_hint)
         : "memory");
     asm volatile("cp.async.bulk.commit_group;");
+#endif
 }
 
 template <int N = 0>
 __device__ __forceinline__ void tma_store_wait() {
+#ifdef USE_MACA
+  asm volatile("" ::: "memory");
+#else
     asm volatile("cp.async.bulk.wait_group.read %0;" ::"n"(N) : "memory");
+#endif
 }
 
 #endif  // MOONCAKE_EP_USE_MUSA
@@ -185,22 +299,38 @@ __device__ __forceinline__ dtype_t broadcast(dtype_t &ptr, int src_lane_idx) {
 #pragma unroll
     for (int i = 0; i < sizeof(dtype_t) / sizeof(int); ++i)
         recv_int_values[i] =
+#ifdef USE_MACA
+            __shfl_sync(kLocalWarpMask, send_int_values[i], src_lane_idx);
+#else
             __shfl_sync(0xffffffff, send_int_values[i], src_lane_idx);
+#endif
     return *reinterpret_cast<dtype_t *>(recv_int_values);
 }
 
 __forceinline__ __device__ int warp_reduce_sum(int value) {
+#ifdef USE_MACA
+    value += __shfl_xor_sync(kLocalWarpMask, value, 32);
+    value += __shfl_xor_sync(kLocalWarpMask, value, 16);
+    value += __shfl_xor_sync(kLocalWarpMask, value, 8);
+    value += __shfl_xor_sync(kLocalWarpMask, value, 4);
+    value += __shfl_xor_sync(kLocalWarpMask, value, 2);
+    value += __shfl_xor_sync(kLocalWarpMask, value, 1);
+#else
     value += __shfl_xor_sync(0xffffffff, value, 16);
     value += __shfl_xor_sync(0xffffffff, value, 8);
     value += __shfl_xor_sync(0xffffffff, value, 4);
     value += __shfl_xor_sync(0xffffffff, value, 2);
     value += __shfl_xor_sync(0xffffffff, value, 1);
+  #endif
     return value;
 }
 
 __forceinline__ __device__ float half_warp_reduce_max(float value) {
     auto mask = __activemask();
     // The mask be in `{0xffffffff, 0xffff}`
+#ifdef USE_MACA
+    value = max(value, __shfl_xor_sync(mask, value, 16));
+#endif
     value = max(value, __shfl_xor_sync(mask, value, 8));
     value = max(value, __shfl_xor_sync(mask, value, 4));
     value = max(value, __shfl_xor_sync(mask, value, 2));

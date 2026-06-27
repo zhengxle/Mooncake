@@ -64,9 +64,13 @@ __device__ __forceinline__ ep_fp8x2_storage_t ep_cvt_float2_to_fp8x2(float2 x) {
 // -- Device intrinsics -------------------------------------------------------
 #if defined(__CUDACC__) || defined(__MCC__)
 __forceinline__ __device__ int get_lane_id() {
+#ifdef USE_MACA
+  return __lane_id();
+#else
     int lane_id;
     asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
     return lane_id;
+#endif
 }
 #endif
 
