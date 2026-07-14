@@ -432,6 +432,8 @@ ${AUDITWHEEL_CMD} repair ${OUTPUT_DIR}/*.whl \
     --exclude ascend_transport*.so \
     --exclude libaccl_barex.so* \
     --exclude liburma.so* \
+    --exclude libmccl.so* \
+    --exclude libmcruntime.so* \
     -w ${REPAIRED_DIR}/ --plat ${PLATFORM_TAG}
 
 # Inject CUDA extensions into the repaired wheel.  patchelf (used by auditwheel)
