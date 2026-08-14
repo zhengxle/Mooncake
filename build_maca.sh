@@ -6,6 +6,7 @@ export CUCC_CMAKE_ENTRY=2
 export CUCC_CUDA_VERSION=12090
 export PATH=/opt/maca/tools/cu-bridge/bin:$PATH
 
+[[ -d '/opt/maca/tools/cu-bridge/lib' ]] && ln -s /opt/maca/lib/libmcruntime.so /opt/maca/tools/cu-bridge/lib/libcudart.so
 [[ "$1" == "-f" ]] && rm -rf build
 mkdir -p build && cd build
 cmake -G Ninja .. -DBUILD_UNIT_TESTS=OFF \

@@ -28,6 +28,7 @@
 #include <fstream>
 #include <memory>
 #include <thread>
+#include "bridge/runtime/cuda_driver_types.h"
 
 #if defined (USE_MACA)
 #include "gpu_vendor/maca.h"
@@ -417,7 +418,7 @@ int RdmaContext::registerMemoryRegionInternal(void *addr, size_t length,
         int dmabuf_fd;
         result = static_cast<CUresult>(cuMemGetHandleForAddressRange(
 #ifdef USE_MACA
-            &dmabuf_fd, reinterpret_cast<void*>(allocBase), allocSize,
+            &dmabuf_fd, reinterpret_cast<mcDrvDeviceptr_t>(allocBase), allocSize,
 #else
             &dmabuf_fd, allocBase, allocSize,
 #endif
